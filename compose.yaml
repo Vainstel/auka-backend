@@ -1,0 +1,26 @@
+services:
+  auka:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${HOST_BIND:-0.0.0.0}:${HOST_PORT:-8443}:8443"
+    volumes:
+      - auka-data:/data
+    mem_limit: 300m
+    read_only: true
+    # The SQLite driver unpacks its native library here, so this tmpfs must allow exec.
+    tmpfs:
+      - /tmp:size=32m,exec,uid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  auka-data:
