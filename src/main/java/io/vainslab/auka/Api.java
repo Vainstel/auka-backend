@@ -686,6 +686,7 @@ final class Api {
             aps.put("interruption-level", "time-sensitive");
         }
         aps.put("relevance-score", 1.0);
+        aps.put("mutable-content", 1);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("aps", aps);
         payload.put("type", "ring");
