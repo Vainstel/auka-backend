@@ -28,7 +28,9 @@ Text · copy-exact code blocks · photos and files · a "ring their phone" butto
 - Email confirmation and a login code (optional), invite codes, blocking
 - Push notifications through APNs. The text is decrypted on the device, so Apple sees only ciphertext
 
-## Quick start
+## Run your own server
+
+You need a Linux host with Docker and the compose plugin, about 300 MB of free RAM, and TCP port 8443 open. Any small VPS or a home server will do.
 
 ```sh
 git clone https://github.com/Vainstel/auka-backend.git && cd auka-backend
@@ -37,7 +39,11 @@ docker compose up -d --build
 docker compose logs | grep -A1 fingerprint
 ```
 
-In the app, enter the server's IP (or domain). The app shows the certificate fingerprint: compare it with the one from the log and tap "Trust". Open TCP port 8443 in the firewall. Everything lives in the `auka-data` volume and survives restarts and upgrades.
+In the app, enter the server's IP (or domain). The app shows the certificate fingerprint: compare it with the one from the log and tap "Trust". Then register and share the invite code with the people you want on the server.
+
+Push notifications work out of the box through the public Auka relays; nothing to configure. Everything lives in the `auka-data` volume and survives restarts and upgrades.
+
+To upgrade: `git pull && docker compose up -d --build`.
 
 ## Configuration
 
