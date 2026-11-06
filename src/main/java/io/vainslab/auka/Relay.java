@@ -38,18 +38,20 @@ final class Relay {
     private final ObjectMapper json;
     private final Pusher pusher;
     private final boolean criticalRing;
+    private final boolean trustProxy;
     private final RateLimiter limiter = new RateLimiter();
 
-    Relay(byte[] secret, ObjectMapper json, Pusher pusher, boolean criticalRing) {
+    Relay(byte[] secret, ObjectMapper json, Pusher pusher, boolean criticalRing, boolean trustProxy) {
         if (secret.length != 32) throw new IllegalStateException("RELAY_SECRET must be 32 bytes in base64");
         this.key = new SecretKeySpec(secret, "AES");
         this.json = json;
         this.pusher = pusher;
         this.criticalRing = criticalRing;
+        this.trustProxy = trustProxy;
     }
 
     static Javalin start(Config config, byte[] secret, ObjectMapper json, Pusher pusher) {
-        Relay relay = new Relay(secret, json, pusher, config.apnsCriticalRing());
+        Relay relay = new Relay(secret, json, pusher, config.apnsCriticalRing(), config.trustProxy());
         Javalin app = Javalin.create(c -> {
             c.startup.showJavalinBanner = false;
             c.http.maxRequestSize = 4096;
@@ -69,7 +71,7 @@ final class Relay {
             c.routes.get(PREFIX + "/info", ctx -> ctx.contentType("application/json").result("{\"service\":\"auka-relay\",\"version\":1}"));
             c.routes.post(PREFIX + "/register", relay::register);
             c.routes.post(PREFIX + "/push", relay::push);
-            c.routes.before(ctx -> relay.limiter.check("ip:" + ctx.req().getRemoteAddr(), 1200, MINUTE));
+            c.routes.before(ctx -> relay.limiter.check("ip:" + relay.ip(ctx), 1200, MINUTE));
         });
         app.start();
         Thread.ofPlatform().daemon().start(() -> {
@@ -87,7 +89,7 @@ final class Relay {
 
     /** Called by the app itself, so the device token never passes through anyone's self-hosted server. */
     private void register(Context ctx) {
-        limiter.check("ip:register:" + ctx.req().getRemoteAddr(), 30, HOUR);
+        limiter.check("ip:register:" + ip(ctx), 30, HOUR);
         JsonNode b = body(ctx);
         String token = b.path("token").asText("");
         if (!APNS_TOKEN.matcher(token).matches()) throw new ApiError(400, "invalid_request");
@@ -190,6 +192,17 @@ final class Relay {
         } catch (Exception e) {
             return java.util.Optional.empty();
         }
+    }
+
+    /** Behind Cloudflare every request comes from the tunnel, so the real client is in its header. */
+    private String ip(Context ctx) {
+        if (trustProxy) {
+            String cf = ctx.header("CF-Connecting-IP");
+            if (cf != null && !cf.isBlank()) return cf.trim();
+            String xff = ctx.header("X-Forwarded-For");
+            if (xff != null && !xff.isBlank()) return xff.substring(xff.lastIndexOf(',') + 1).trim();
+        }
+        return ctx.req().getRemoteAddr();
     }
 
     private JsonNode body(Context ctx) {
