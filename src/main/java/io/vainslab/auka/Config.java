@@ -24,7 +24,10 @@ record Config(
         String apnsTeamId,
         String apnsTopic,
         boolean apnsCriticalRing,
-        int messageRetentionDays
+        int messageRetentionDays,
+        long fileStorageMb,
+        int fileTtlHours,
+        int fileMaxMb
 ) {
     static Config fromEnv(Map<String, String> env) {
         String serverName = env.getOrDefault("SERVER_NAME", "Auka");
@@ -48,13 +51,24 @@ record Config(
                 blankToNull(env.get("APNS_TEAM_ID")),
                 blankToNull(env.get("APNS_TOPIC")),
                 Boolean.parseBoolean(env.getOrDefault("APNS_CRITICAL_RING", "false")),
-                Integer.parseInt(env.getOrDefault("MESSAGE_RETENTION_DAYS", "0"))
+                Integer.parseInt(env.getOrDefault("MESSAGE_RETENTION_DAYS", "0")),
+                Long.parseLong(env.getOrDefault("FILE_STORAGE_MB", "500")),
+                Integer.parseInt(env.getOrDefault("FILE_TTL_HOURS", "168")),
+                Integer.parseInt(env.getOrDefault("FILE_MAX_MB", "15"))
         );
     }
 
     /** With no SMTP configured the server runs single-factor: login and password only. */
     boolean emailVerification() {
         return smtpHost != null;
+    }
+
+    long fileStorageBytes() {
+        return fileStorageMb * 1024 * 1024;
+    }
+
+    long fileMaxBytes() {
+        return fileMaxMb * 1024L * 1024;
     }
 
     boolean apnsEnabled() {

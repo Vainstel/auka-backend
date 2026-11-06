@@ -111,6 +111,18 @@ final class Db implements AutoCloseable {
                 streak INTEGER NOT NULL,
                 PRIMARY KEY (caller_id, callee_id)
             );
+            """,
+            """
+            CREATE TABLE files (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                size INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX files_expires ON files(expires_at);
+            ALTER TABLE messages ADD COLUMN file_id TEXT;
             """
     };
 

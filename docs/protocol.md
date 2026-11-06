@@ -32,6 +32,18 @@ AAD is the UTF-8 of `auka-msg-v1|<senderId>|<recipientId>|<clientId>`, so the se
 
 To decrypt, take the peer's key from the envelope (`s` for incoming, `r` for outgoing) and accept it only if the device trusts that key for that peer. An unknown key means the message is shown as unverified until the user accepts it.
 
+## Files and photos
+
+1. The sender makes a random 32-byte `fileKey` and encrypts the file: `blob = nonce(12) || ChaCha20-Poly1305(fileKey, nonce, file, aad="auka-file-v1") || tag(16)`.
+2. `POST /files?recipientId=<id>` with the blob as a raw body (`application/octet-stream`). The answer is `{id, size, expiresAt}`.
+3. The sender sends a normal message with `"fileId"` and this content inside the envelope:
+   `{"k":"image"|"file","t":"","f":{"id","key","name","size","mime","exp"}}`, where `key` is `fileKey` in base64 and `exp` is `expiresAt`.
+4. The recipient gets the key from the decrypted message, downloads `GET /files/{id}` and decrypts.
+
+So only the two people in the chat can open a file. The server stores ciphertext and doesn't know the name, type or content.
+
+Only the uploader and that recipient can download a file, and a message can only reference a file its sender uploaded for that same recipient. Deleting the message deletes the file. After `FILE_TTL_HOURS` the server deletes it: downloads then get `410 file_expired`. Uploads over `FILE_MAX_MB` get `413 file_too_large`. When `FILE_STORAGE_MB` is used up, uploads get `507 storage_full`. `/server-info` reports `maxFileBytes` and `fileTtlHours`.
+
 ## Key trust
 
 Clients pin each peer's public key on first sight and keep the pins across logout, so a forced re-login can't reset them. When the server later reports a different key (the peer reset their password, or the server is lying), the client stops sending and asks the user to confirm. Old trusted keys are kept so that history stays readable.

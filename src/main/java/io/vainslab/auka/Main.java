@@ -120,6 +120,13 @@ public final class Main {
                 log.warn("Cleanup failed", e);
             }
         }, 1, 60, TimeUnit.MINUTES);
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                api.cleanupFiles();
+            } catch (Exception e) {
+                log.warn("File cleanup failed", e);
+            }
+        }, 1, 5, TimeUnit.MINUTES);
         return app;
     }
 

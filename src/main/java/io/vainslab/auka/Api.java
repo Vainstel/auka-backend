@@ -43,6 +43,8 @@ final class Api {
     private static final int SYNC_PAGE_CHARS = 2_000_000;
     private static final long DAILY_SEND_CHARS = 50_000_000L;
     private static final int CODE_FAILURES_PER_DAY = 20;
+    // Room for the nonce, tag and the client's padding on top of the plaintext limit.
+    private static final long FILE_OVERHEAD = 64 * 1024;
     private static final long CODE_TTL = 10 * 60_000L;
     private static final int CODE_ATTEMPTS = 5;
     private static final long MINUTE = 60_000L;
@@ -64,6 +66,7 @@ final class Api {
     private final Mailer mailer;
     private final Pusher pusher;
     private final RateLimiter limiter;
+    private final FileStore files;
     private final byte[] serverSecret;
     private final byte[] dummySalt;
     private final AtomicInteger mailsToday = new AtomicInteger();
@@ -77,6 +80,7 @@ final class Api {
         this.mailer = mailer;
         this.pusher = pusher;
         this.limiter = limiter;
+        this.files = new FileStore(config.dataDir().resolve("files"));
         this.serverSecret = db.serverSecret();
         this.dummySalt = Secrets.hmac(serverSecret, "dummy-salt");
     }
@@ -124,6 +128,8 @@ final class Api {
         r.post(PREFIX + "/messages", this::sendMessage);
         r.delete(PREFIX + "/messages/{id}", this::deleteMessage);
         r.get(PREFIX + "/sync", this::sync);
+        r.post(PREFIX + "/files", this::uploadFile);
+        r.get(PREFIX + "/files/{id}", this::downloadFile);
 
         r.get(PREFIX + "/rings/{id}", this::ringStatus);
         r.post(PREFIX + "/rings/{id}", this::ring);
@@ -139,7 +145,9 @@ final class Api {
                 "emailVerification", config.emailVerification(),
                 "inviteRequired", config.inviteCode() != null,
                 "pushEnabled", config.apnsEnabled(),
-                "kdfIterations", DEFAULT_KDF_ITERATIONS));
+                "kdfIterations", DEFAULT_KDF_ITERATIONS,
+                "maxFileBytes", config.fileMaxBytes(),
+                "fileTtlHours", config.fileTtlHours()));
     }
 
     /** Unknown emails get a stable fake salt, so this endpoint cannot be used to probe accounts. */
@@ -458,8 +466,13 @@ final class Api {
         String recipient = uuid(text(b, "recipientId", 40));
         String clientId = uuid(text(b, "clientId", 40));
         String envelope = text(b, "envelope", MAX_ENVELOPE_CHARS);
+        String fileId = b.hasNonNull("fileId") ? fileUuid(text(b, "fileId", 40)) : null;
         requireOtherUser(s, recipient);
         requireNotBlocked(s.userId(), recipient);
+        // A message may only point at a file its sender uploaded for this very recipient.
+        if (fileId != null && !db.exists("SELECT 1 FROM files WHERE id=? AND owner_id=? AND recipient_id=?", fileId, s.userId(), recipient)) {
+            throw new ApiError(404, "file_not_found");
+        }
         if (!ringAllowed(s.userId(), recipient)) {
             // Until the other side answers, a stranger can only knock a few times.
             limiter.check("user:stranger:" + s.userId() + ":" + recipient, 10, 24 * HOUR);
@@ -478,8 +491,8 @@ final class Api {
                     rs -> rs.getLong(1), s.userId(), now - 24 * HOUR).orElse(0L);
             if (sentToday + envelope.length() > DAILY_SEND_CHARS) throw new ApiError(429, "quota_exceeded");
             long seq = db.nextSeq();
-            db.update("INSERT INTO messages (seq, sender_id, recipient_id, client_id, envelope, created_at) VALUES (?,?,?,?,?,?)",
-                    seq, s.userId(), recipient, clientId, envelope, now);
+            db.update("INSERT INTO messages (seq, sender_id, recipient_id, client_id, envelope, created_at, file_id) VALUES (?,?,?,?,?,?,?)",
+                    seq, s.userId(), recipient, clientId, envelope, now, fileId);
             long id = db.one("SELECT last_insert_rowid()", rs -> rs.getLong(1)).orElseThrow();
             return new Saved(id, seq, now, true);
         });
@@ -502,14 +515,17 @@ final class Api {
             throw new ApiError(404, "message_not_found");
         }
         var peers = db.tx(() -> {
-            var row = db.one("SELECT sender_id, recipient_id, deleted_at FROM messages WHERE id=? AND (sender_id=? OR recipient_id=?)",
-                    rs -> new String[]{rs.getString(1), rs.getString(2), rs.getString(3)}, id, s.userId(), s.userId())
+            var row = db.one("SELECT sender_id, recipient_id, deleted_at, file_id FROM messages WHERE id=? AND (sender_id=? OR recipient_id=?)",
+                    rs -> new String[]{rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)}, id, s.userId(), s.userId())
                     .orElseThrow(() -> new ApiError(404, "message_not_found"));
             if (row[2] == null) {
                 db.update("UPDATE messages SET envelope=NULL, deleted_at=?, seq=? WHERE id=?", System.currentTimeMillis(), db.nextSeq(), id);
+                if (row[3] != null) db.update("DELETE FROM files WHERE id=?", row[3]);
             }
             return row;
         });
+        // Deleting the message takes its attachment with it.
+        if (peers[3] != null) files.delete(peers[3]);
         hub.poke(peers[0]);
         hub.poke(peers[1]);
         ctx.status(204);
@@ -593,6 +609,90 @@ final class Api {
         if (!messages.isEmpty()) cursor = Math.max(cursor, (long) messages.getLast().get("seq"));
         if (!reads.isEmpty()) cursor = Math.max(cursor, (long) reads.getLast().get("seq"));
         send(ctx, Map.of("messages", messages, "reads", reads, "cursor", cursor, "hasMore", hasMore));
+    }
+
+    // --- files ---
+
+    /** The body is ciphertext made by the client; the server only checks size and storage room. */
+    private void uploadFile(Context ctx) {
+        Session s = session(ctx);
+        limiter.check("user:upload:" + s.userId(), 60, HOUR);
+        String recipient = uuid(String.valueOf(ctx.queryParam("recipientId")));
+        requireOtherUser(s, recipient);
+        requireNotBlocked(s.userId(), recipient);
+        if (!ringAllowed(s.userId(), recipient)) {
+            limiter.check("user:stranger-files:" + s.userId() + ":" + recipient, 3, 24 * HOUR);
+        }
+        long max = config.fileMaxBytes() + FILE_OVERHEAD;
+        long declared = ctx.req().getContentLengthLong();
+        if (declared > max) throw new ApiError(413, "file_too_large", Map.of("maxBytes", config.fileMaxBytes()));
+        long reserve = declared > 0 ? declared : max;
+        String id = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        long expiresAt = now + config.fileTtlHours() * HOUR;
+        db.tx(() -> {
+            // Room is reserved before the upload starts, so parallel uploads can't overshoot the limit.
+            long used = db.one("SELECT COALESCE(SUM(size), 0) FROM files WHERE expires_at>?", rs -> rs.getLong(1), now).orElse(0L);
+            if (used + reserve > config.fileStorageBytes()) {
+                log.warn("File storage is full: {} of {} bytes used", used, config.fileStorageBytes());
+                throw new ApiError(507, "storage_full");
+            }
+            return db.update("INSERT INTO files (id, owner_id, recipient_id, size, created_at, expires_at) VALUES (?,?,?,?,?,?)",
+                    id, s.userId(), recipient, reserve, now, expiresAt);
+        });
+        long size;
+        try {
+            size = files.write(id, ctx.req().getInputStream(), max);
+        } catch (Exception e) {
+            dropFile(id);
+            throw new ApiError(400, "upload_failed");
+        }
+        if (size <= 0) {
+            dropFile(id);
+            if (size < 0) throw new ApiError(413, "file_too_large", Map.of("maxBytes", config.fileMaxBytes()));
+            throw new ApiError(400, "invalid_request");
+        }
+        db.update("UPDATE files SET size=? WHERE id=?", size, id);
+        send(ctx, Map.of("id", id, "size", size, "expiresAt", expiresAt));
+    }
+
+    private void downloadFile(Context ctx) {
+        Session s = session(ctx);
+        String id = fileUuid(ctx.pathParam("id"));
+        record Row(long size, long expiresAt) {
+        }
+        Row row = db.one("SELECT size, expires_at FROM files WHERE id=? AND (owner_id=? OR recipient_id=?)",
+                        rs -> new Row(rs.getLong(1), rs.getLong(2)), id, s.userId(), s.userId())
+                .orElseThrow(() -> new ApiError(404, "file_not_found"));
+        if (row.expiresAt() <= System.currentTimeMillis()) throw new ApiError(410, "file_expired");
+        try {
+            ctx.header("Content-Length", String.valueOf(row.size()));
+            ctx.contentType("application/octet-stream").result(files.open(id));
+        } catch (java.io.IOException e) {
+            throw new ApiError(404, "file_not_found");
+        }
+    }
+
+    private void dropFile(String id) {
+        db.update("DELETE FROM files WHERE id=?", id);
+        files.delete(id);
+    }
+
+    /** Expired files go first from the table, then from disk; blobs left without a row are swept too. */
+    void cleanupFiles() {
+        long now = System.currentTimeMillis();
+        for (String id : db.query("SELECT id FROM files WHERE expires_at<=?", rs -> rs.getString(1), now)) dropFile(id);
+        for (String id : files.storedIds()) {
+            if (!db.exists("SELECT 1 FROM files WHERE id=?", id)) files.delete(id);
+        }
+    }
+
+    private static String fileUuid(String raw) {
+        try {
+            return UUID.fromString(raw).toString();
+        } catch (IllegalArgumentException e) {
+            throw new ApiError(404, "file_not_found");
+        }
     }
 
     // --- rings ---

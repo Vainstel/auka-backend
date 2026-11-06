@@ -74,6 +74,15 @@ def open_envelope(my_priv_raw, msg):
     return json.loads(ChaCha20Poly1305(message_key(my_priv_raw, peer)).decrypt(unb64(env["n"]), unb64(env["c"]), aad))
 
 
+def seal_file(key, data, nonce=None):
+    nonce = nonce or os.urandom(12)
+    return nonce + ChaCha20Poly1305(key).encrypt(nonce, data, b"auka-file-v1")
+
+
+def open_file(key, blob):
+    return ChaCha20Poly1305(key).decrypt(blob[:12], blob[12:], b"auka-file-v1")
+
+
 def safety_number(a, b):
     lo, hi = sorted([a, b])
     d = hashlib.sha256(lo + hi).digest()
@@ -97,6 +106,8 @@ def vectors(path):
         "senderId": ids[0], "recipientId": ids[1], "clientId": ids[2], "kind": "code", "text": text,
         "envelope": seal(a_priv, b_pub, ids[0], ids[1], ids[2], "code", text, nonce),
         "safetyNumber": safety_number(a_pub, b_pub),
+        "fileKey": b64(bytes([7] * 32)), "filePlain": b64("фото-data".encode() * 10),
+        "fileBlob": b64(seal_file(bytes([7] * 32), "фото-data".encode() * 10, nonce)),
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
@@ -150,6 +161,18 @@ class Client:
     def sync(self):
         return self.call("GET", "/sync")["messages"]
 
+    def raw(self, method, path, data=None, expect=200):
+        req = urllib.request.Request(self.base + "/api/v1" + path, method=method, data=data)
+        req.add_header("Authorization", "Bearer " + self.token)
+        req.add_header("Content-Type", "application/octet-stream")
+        try:
+            with urllib.request.urlopen(req, context=self.ctx) as r:
+                status, body = r.status, r.read()
+        except urllib.error.HTTPError as e:
+            status, body = e.code, e.read()
+        assert status == expect, (method, path, status, body[:300])
+        return body
+
 
 def main():
     if sys.argv[1] == "--vectors":
@@ -199,6 +222,12 @@ def main():
     b.call("DELETE", f"/messages/{first['id']}", expect=204)
     gone = next(m for m in a.sync() if m["id"] == first["id"])
     assert gone["deleted"] is True and gone["envelope"] is None
+
+    photo, fkey = os.urandom(2_000_000), os.urandom(32)
+    up = json.loads(a.raw("POST", f"/files?recipientId={b.id}", seal_file(fkey, photo)))
+    a.send(b.id, b.pub, "image", "")
+    assert open_file(fkey, b.raw("GET", f"/files/{up['id']}")) == photo, "the recipient opens the photo"
+    c.raw("GET", f"/files/{up['id']}", expect=404)
 
     print("E2E OK")
     if "--load" in sys.argv:

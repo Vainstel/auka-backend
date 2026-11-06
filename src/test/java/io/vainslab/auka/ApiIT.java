@@ -42,6 +42,7 @@ class ApiIT {
     private Javalin app;
     private Db db;
     private int port;
+    private final Map<String, String> extraEnv = new HashMap<>();
 
     private void boot(boolean mail, String invite) throws Exception {
         try (ServerSocket s = new ServerSocket(0)) {
@@ -56,6 +57,7 @@ class ApiIT {
         env.put("APNS_KEY_ID", "x");
         env.put("APNS_TEAM_ID", "x");
         env.put("APNS_TOPIC", "x");
+        env.putAll(extraEnv);
         db = new Db(dir);
         app = Main.start(Config.fromEnv(env), db, json, codes::put, (t, sb, push, dead) -> pushes.add(push));
     }
@@ -110,6 +112,67 @@ class ApiIT {
         Res r = call("POST", "/messages", from.token(), Map.of("recipientId", to.id(), "clientId", UUID.randomUUID().toString(), "envelope", envelope));
         assertEquals(200, r.status(), r.body().toString());
         return r.body().path("id").asText();
+    }
+
+    private Res upload(User from, User to, byte[] data) throws Exception {
+        var req = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/files?recipientId=" + to.id()))
+                .header("Authorization", "Bearer " + from.token())
+                .POST(HttpRequest.BodyPublishers.ofByteArray(data)).build();
+        var r = http.send(req, HttpResponse.BodyHandlers.ofString());
+        return new Res(r.statusCode(), r.body().isEmpty() ? json.nullNode() : json.readTree(r.body()));
+    }
+
+    private HttpResponse<byte[]> download(User who, String id) throws Exception {
+        var req = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/files/" + id))
+                .header("Authorization", "Bearer " + who.token()).GET().build();
+        return http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+    }
+
+    @Test
+    void filesReachOnlyTheTwoPeople() throws Exception {
+        boot(false, null);
+        User a = user("alice"), b = user("bobby"), c = user("carol");
+        call("POST", "/contacts", b.token(), Map.of("userId", a.id()));
+        byte[] data = new byte[300_000];
+        new java.util.Random(1).nextBytes(data);
+        Res up = upload(a, b, data);
+        assertEquals(200, up.status(), up.body().toString());
+        String id = up.body().path("id").asText();
+        long ttl = up.body().path("expiresAt").asLong() - System.currentTimeMillis();
+        assertTrue(Math.abs(ttl - 168 * 3_600_000L) < 60_000);
+        assertTrue(java.util.Arrays.equals(data, download(b, id).body()));
+        assertTrue(java.util.Arrays.equals(data, download(a, id).body()));
+        assertEquals(404, download(c, id).statusCode());
+
+        // Only the uploader can attach the file, and only in a message to that same person.
+        assertEquals(404, call("POST", "/messages", c.token(), Map.of("recipientId", b.id(), "clientId", UUID.randomUUID().toString(), "envelope", "x", "fileId", id)).status());
+        Res msg = call("POST", "/messages", a.token(), Map.of("recipientId", b.id(), "clientId", UUID.randomUUID().toString(), "envelope", "x", "fileId", id));
+        assertEquals(200, msg.status());
+        assertEquals(204, call("DELETE", "/messages/" + msg.body().path("id").asText(), b.token(), null).status());
+        assertEquals(404, download(a, id).statusCode());
+    }
+
+    @Test
+    void fileLimitsAndExpiry() throws Exception {
+        extraEnv.put("FILE_MAX_MB", "1");
+        extraEnv.put("FILE_STORAGE_MB", "2");
+        extraEnv.put("FILE_TTL_HOURS", "5");
+        boot(false, null);
+        User a = user("alice"), b = user("bobby");
+        call("POST", "/contacts", b.token(), Map.of("userId", a.id()));
+        assertEquals(5, call("GET", "/server-info", null, null).body().path("fileTtlHours").asInt());
+        assertEquals(413, upload(a, b, new byte[1_200_000]).status());
+
+        String first = upload(a, b, new byte[900_000]).body().path("id").asText();
+        assertEquals(200, upload(a, b, new byte[900_000]).status());
+        Res full = upload(a, b, new byte[900_000]);
+        assertEquals(507, full.status());
+        assertEquals("storage_full", full.body().path("error").asText());
+
+        // An expired file is gone for both sides and no longer takes up room.
+        db.update("UPDATE files SET expires_at=? WHERE id=?", System.currentTimeMillis() - 1, first);
+        assertEquals(410, download(b, first).statusCode());
+        assertEquals(200, upload(a, b, new byte[900_000]).status());
     }
 
     @Test
