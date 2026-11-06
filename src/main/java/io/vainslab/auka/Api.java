@@ -37,7 +37,6 @@ final class Api {
     private static final int MIN_KDF_ITERATIONS = 600_000;
     private static final int MAX_KDF_ITERATIONS = 10_000_000;
     private static final int MAX_ENVELOPE_CHARS = 200_000;
-    private static final int MAX_PUSH_ENVELOPE_CHARS = 2_800;
     private static final int AVATAR_COLORS = 12;
     private static final int SYNC_PAGE = 200;
     private static final int SYNC_PAGE_CHARS = 2_000_000;
@@ -67,6 +66,7 @@ final class Api {
     private final Pusher pusher;
     private final RateLimiter limiter;
     private final FileStore files;
+    private final RelayClient relays;
     private final byte[] serverSecret;
     private final byte[] dummySalt;
     private final AtomicInteger mailsToday = new AtomicInteger();
@@ -81,6 +81,7 @@ final class Api {
         this.pusher = pusher;
         this.limiter = limiter;
         this.files = new FileStore(config.dataDir().resolve("files"));
+        this.relays = new RelayClient(RelayClient.parseAll(config.pushRelays()), json);
         this.serverSecret = db.serverSecret();
         this.dummySalt = Secrets.hmac(serverSecret, "dummy-salt");
     }
@@ -126,6 +127,7 @@ final class Api {
         r.get(PREFIX + "/chats", this::listChats);
         r.post(PREFIX + "/chats/{id}/read", this::markRead);
         r.post(PREFIX + "/messages", this::sendMessage);
+        r.get(PREFIX + "/messages/{id}", this::getMessage);
         r.delete(PREFIX + "/messages/{id}", this::deleteMessage);
         r.get(PREFIX + "/sync", this::sync);
         r.post(PREFIX + "/files", this::uploadFile);
@@ -139,15 +141,19 @@ final class Api {
 
     private void serverInfo(Context ctx) {
         limiter.check("ip:info:" + ip(ctx), 120, MINUTE);
-        send(ctx, Map.of(
-                "name", config.serverName(),
-                "version", 1,
-                "emailVerification", config.emailVerification(),
-                "inviteRequired", config.inviteCode() != null,
-                "pushEnabled", config.apnsEnabled(),
-                "kdfIterations", DEFAULT_KDF_ITERATIONS,
-                "maxFileBytes", config.fileMaxBytes(),
-                "fileTtlHours", config.fileTtlHours()));
+        Map<String, Object> info = new HashMap<>();
+        info.put("name", config.serverName());
+        info.put("version", 1);
+        info.put("emailVerification", config.emailVerification());
+        info.put("inviteRequired", config.inviteCode() != null);
+        info.put("pushEnabled", config.apnsEnabled() || relays.enabled());
+        // With its own Apple key the server pushes directly; otherwise the app registers with a relay.
+        info.put("pushMode", config.apnsEnabled() ? "direct" : relays.enabled() ? "relay" : "none");
+        info.put("relays", relays.targets().stream().map(RelayClient.Target::describe).toList());
+        info.put("kdfIterations", DEFAULT_KDF_ITERATIONS);
+        info.put("maxFileBytes", config.fileMaxBytes());
+        info.put("fileTtlHours", config.fileTtlHours());
+        send(ctx, info);
     }
 
     /** Unknown emails get a stable fake salt, so this endpoint cannot be used to probe accounts. */
@@ -381,6 +387,16 @@ final class Api {
     private void setPushToken(Context ctx) {
         Session s = session(ctx);
         JsonNode b = body(ctx);
+        if (b.hasNonNull("handle")) {
+            String handle = text(b, "handle", 400);
+            if (!handle.matches("^[A-Za-z0-9_-]+$")) throw new ApiError(400, "invalid_request");
+            db.tx(() -> {
+                db.update("UPDATE sessions SET push_handle=NULL WHERE push_handle=?", handle);
+                return db.update("UPDATE sessions SET push_handle=?, apns_token=NULL WHERE token_hash=?", handle, s.tokenHash());
+            });
+            ctx.status(204);
+            return;
+        }
         String token = text(b, "token", 256);
         if (!APNS_TOKEN.matcher(token).matches()) throw new ApiError(400, "invalid_request");
         db.tx(() -> {
@@ -393,7 +409,7 @@ final class Api {
     }
 
     private void clearPushToken(Context ctx) {
-        db.update("UPDATE sessions SET apns_token=NULL WHERE token_hash=?", session(ctx).tokenHash());
+        db.update("UPDATE sessions SET apns_token=NULL, push_handle=NULL WHERE token_hash=?", session(ctx).tokenHash());
         ctx.status(204);
     }
 
@@ -749,60 +765,58 @@ final class Api {
     // --- push ---
 
     private void pushMessage(String senderId, String recipient, long messageId, String clientId, String envelope) {
-        if (!config.apnsEnabled()) return;
-        String senderName = db.one("SELECT display_name FROM users WHERE id=?", rs -> rs.getString(1), senderId).orElse("");
         int badge = db.one("""
                 SELECT COUNT(*) FROM messages m
                 LEFT JOIN read_markers r ON r.reader_id = m.recipient_id AND r.peer_id = m.sender_id
                 WHERE m.recipient_id=? AND m.deleted_at IS NULL AND m.id > COALESCE(r.up_to_id, 0)""",
                 rs -> rs.getInt(1), recipient).orElse(0);
-        Map<String, Object> aps = new HashMap<>();
-        aps.put("alert", Map.of("title", senderName, "loc-key", "PUSH_MESSAGE"));
-        aps.put("sound", "default");
-        aps.put("badge", badge);
-        aps.put("mutable-content", 1);
-        aps.put("thread-id", senderId);
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("aps", aps);
-        payload.put("type", "message");
-        payload.put("senderId", senderId);
-        payload.put("recipientId", recipient);
-        payload.put("clientId", clientId);
-        payload.put("messageId", messageId);
-        // The envelope is ciphertext; the device's extension decrypts it to show the text.
-        if (envelope.length() <= MAX_PUSH_ENVELOPE_CHARS) payload.put("envelope", envelope);
-        pushToUser(recipient, new Pusher.Push(payload, "m" + messageId));
+        wake(recipient, new Pusher.Push(Relay.messagePayload(senderId, messageId, badge), "m" + messageId),
+                Map.of("kind", "message", "senderId", senderId, "messageId", messageId, "badge", badge));
     }
 
     private void pushRing(String callee, String ringId, String callerId, String callerName) {
-        if (!config.apnsEnabled()) return;
-        Map<String, Object> aps = new HashMap<>();
-        aps.put("alert", Map.of("title", callerName, "loc-key", "PUSH_RING"));
-        if (config.apnsCriticalRing()) {
-            aps.put("sound", Map.of("critical", 1, "name", "ring.caf", "volume", 1.0));
-            aps.put("interruption-level", "critical");
-        } else {
-            aps.put("sound", "ring.caf");
-            aps.put("interruption-level", "time-sensitive");
-        }
-        aps.put("relevance-score", 1.0);
-        aps.put("mutable-content", 1);
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("aps", aps);
-        payload.put("type", "ring");
-        payload.put("ringId", ringId);
-        payload.put("senderId", callerId);
-        pushToUser(callee, new Pusher.Push(payload, null));
+        wake(callee, new Pusher.Push(Relay.ringPayload(callerId, ringId, config.apnsCriticalRing()), null),
+                Map.of("kind", "ring", "senderId", callerId, "ringId", ringId));
     }
 
-    private void pushToUser(String userId, Pusher.Push push) {
-        record Device(String token, boolean sandbox) {
+    /** Each device gets the push the way it registered: straight to APNs with our key, or through a relay. */
+    private void wake(String userId, Pusher.Push direct, Map<String, Object> relayed) {
+        record Device(String token, boolean sandbox, String handle) {
         }
-        List<Device> devices = db.query("SELECT apns_token, apns_sandbox FROM sessions WHERE user_id=? AND apns_token IS NOT NULL",
-                rs -> new Device(rs.getString(1), rs.getInt(2) == 1), userId);
+        List<Device> devices = db.query("""
+                SELECT apns_token, apns_sandbox, push_handle FROM sessions
+                WHERE user_id=? AND (apns_token IS NOT NULL OR push_handle IS NOT NULL)""",
+                rs -> new Device(rs.getString(1), rs.getInt(2) == 1, rs.getString(3)), userId);
         for (Device d : devices) {
-            pusher.send(d.token(), d.sandbox(), push, dead -> db.update("UPDATE sessions SET apns_token=NULL WHERE apns_token=?", dead));
+            if (d.token() != null && config.apnsEnabled()) {
+                pusher.send(d.token(), d.sandbox(), direct, dead -> db.update("UPDATE sessions SET apns_token=NULL WHERE apns_token=?", dead));
+            } else if (d.handle() != null && relays.enabled()) {
+                Map<String, Object> body = new HashMap<>(relayed);
+                body.put("handle", d.handle());
+                Thread.startVirtualThread(() -> {
+                    if (relays.send(body) == RelayClient.Result.GONE) {
+                        db.update("UPDATE sessions SET push_handle=NULL WHERE push_handle=?", d.handle());
+                    }
+                });
+            }
         }
+    }
+
+    /** One message, for the push extension: it fetches and decrypts the text on the device. */
+    private void getMessage(Context ctx) {
+        String me = session(ctx).userId();
+        long id;
+        try {
+            id = Long.parseLong(ctx.pathParam("id"));
+        } catch (NumberFormatException e) {
+            throw new ApiError(404, "message_not_found");
+        }
+        send(ctx, db.one("""
+                SELECT id, sender_id, recipient_id, client_id, envelope, created_at FROM messages
+                WHERE id=? AND (sender_id=? OR recipient_id=?) AND deleted_at IS NULL""", rs -> Map.of(
+                "id", rs.getLong(1), "senderId", rs.getString(2), "recipientId", rs.getString(3),
+                "clientId", rs.getString(4), "envelope", rs.getString(5), "createdAt", rs.getLong(6)), id, me, me)
+                .orElseThrow(() -> new ApiError(404, "message_not_found")));
     }
 
     // --- helpers ---

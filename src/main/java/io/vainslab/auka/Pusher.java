@@ -19,15 +19,23 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 interface Pusher {
-    /** @param onDead called with the token when APNs says it no longer exists */
-    void send(String token, boolean sandbox, Push push, Consumer<String> onDead);
+    /** Blocks until APNs answers; returns the HTTP status, 410 meaning the device token is dead. */
+    int deliver(String token, boolean sandbox, Push push);
+
+    /** Fire and forget; {@code onDead} gets the token when APNs says it no longer exists. */
+    default void send(String token, boolean sandbox, Push push, Consumer<String> onDead) {
+        Thread.startVirtualThread(() -> {
+            if (deliver(token, sandbox, push) == 410) onDead.accept(token);
+        });
+    }
 
     record Push(Map<String, Object> payload, String collapseId) {
     }
 
     final class Noop implements Pusher {
         @Override
-        public void send(String token, boolean sandbox, Push push, Consumer<String> onDead) {
+        public int deliver(String token, boolean sandbox, Push push) {
+            return 200;
         }
     }
 
@@ -78,28 +86,25 @@ interface Pusher {
         }
 
         @Override
-        public void send(String deviceToken, boolean sandbox, Push push, Consumer<String> onDead) {
-            Thread.startVirtualThread(() -> {
-                try {
-                    String host = sandbox ? "api.sandbox.push.apple.com" : "api.push.apple.com";
-                    HttpRequest.Builder req = HttpRequest.newBuilder(URI.create("https://" + host + "/3/device/" + deviceToken))
-                            .timeout(Duration.ofSeconds(15))
-                            .header("authorization", "bearer " + token())
-                            .header("apns-topic", config.apnsTopic())
-                            .header("apns-push-type", "alert")
-                            .header("apns-priority", "10")
-                            .POST(HttpRequest.BodyPublishers.ofByteArray(json.writeValueAsBytes(push.payload())));
-                    if (push.collapseId() != null) req.header("apns-collapse-id", push.collapseId());
-                    HttpResponse<String> res = http.send(req.build(), HttpResponse.BodyHandlers.ofString());
-                    if (res.statusCode() == 410 || res.body().contains("BadDeviceToken")) {
-                        onDead.accept(deviceToken);
-                    } else if (res.statusCode() != 200) {
-                        log.warn("APNs {}: {}", res.statusCode(), res.body());
-                    }
-                } catch (Exception e) {
-                    log.warn("APNs send failed: {}", e.getClass().getSimpleName());
-                }
-            });
+        public int deliver(String deviceToken, boolean sandbox, Push push) {
+            try {
+                String host = sandbox ? "api.sandbox.push.apple.com" : "api.push.apple.com";
+                HttpRequest.Builder req = HttpRequest.newBuilder(URI.create("https://" + host + "/3/device/" + deviceToken))
+                        .timeout(Duration.ofSeconds(15))
+                        .header("authorization", "bearer " + token())
+                        .header("apns-topic", config.apnsTopic())
+                        .header("apns-push-type", "alert")
+                        .header("apns-priority", "10")
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(json.writeValueAsBytes(push.payload())));
+                if (push.collapseId() != null) req.header("apns-collapse-id", push.collapseId());
+                HttpResponse<String> res = http.send(req.build(), HttpResponse.BodyHandlers.ofString());
+                if (res.statusCode() == 410 || res.body().contains("BadDeviceToken")) return 410;
+                if (res.statusCode() != 200) log.warn("APNs {}: {}", res.statusCode(), res.body());
+                return res.statusCode();
+            } catch (Exception e) {
+                log.warn("APNs send failed: {}", e.getClass().getSimpleName());
+                return 503;
+            }
         }
     }
 }

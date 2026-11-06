@@ -16,3 +16,4 @@ data/
 *.db
 *.db-*
 __pycache__/
+!.env.relay.example

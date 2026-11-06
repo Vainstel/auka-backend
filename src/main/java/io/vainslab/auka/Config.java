@@ -27,8 +27,12 @@ record Config(
         int messageRetentionDays,
         long fileStorageMb,
         int fileTtlHours,
-        int fileMaxMb
+        int fileMaxMb,
+        String pushRelays
 ) {
+    /** The public relays the official app's pushes go through. Filled in when they are deployed. */
+    static final String DEFAULT_PUSH_RELAYS = "";
+
     static Config fromEnv(Map<String, String> env) {
         String serverName = env.getOrDefault("SERVER_NAME", "Auka");
         return new Config(
@@ -54,7 +58,8 @@ record Config(
                 Integer.parseInt(env.getOrDefault("MESSAGE_RETENTION_DAYS", "0")),
                 Long.parseLong(env.getOrDefault("FILE_STORAGE_MB", "500")),
                 Integer.parseInt(env.getOrDefault("FILE_TTL_HOURS", "168")),
-                Integer.parseInt(env.getOrDefault("FILE_MAX_MB", "15"))
+                Integer.parseInt(env.getOrDefault("FILE_MAX_MB", "15")),
+                env.getOrDefault("PUSH_RELAYS", "").isBlank() ? DEFAULT_PUSH_RELAYS : env.get("PUSH_RELAYS")
         );
     }
 

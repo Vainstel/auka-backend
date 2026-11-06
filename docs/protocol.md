@@ -44,6 +44,17 @@ So only the two people in the chat can open a file. The server stores ciphertext
 
 Only the uploader and that recipient can download a file, and a message can only reference a file its sender uploaded for that same recipient. Deleting the message deletes the file. After `FILE_TTL_HOURS` the server deletes it: downloads then get `410 file_expired`. Uploads over `FILE_MAX_MB` get `413 file_too_large`. When `FILE_STORAGE_MB` is used up, uploads get `507 storage_full`. `/server-info` reports `maxFileBytes` and `fileTtlHours`.
 
+## Push
+
+Pushes contain no message content. A message push carries `type:"message"`, `senderId` and `messageId`. The app's notification extension fetches `GET /messages/{id}` from its own server and decrypts it on the device. A ring push carries `type:"ring"`, `senderId` and `ringId`.
+
+`/server-info` returns `pushMode`:
+- `direct`: the server has its own Apple key. The app sends `PUT /me/push-token {token, sandbox}`.
+- `relay`: the app sends its token to a relay from `relays` with `POST /relay/v1/register {token, sandbox}` and gets back `{handle}`. It then sends `PUT /me/push-token {handle}`. A relay with a `pin` is trusted only with that exact certificate.
+- `none`: no pushes.
+
+The server wakes a device with `POST /relay/v1/push {handle, kind, senderId, messageId|ringId, badge}`. It tries relays in order and moves to the next only when one is unreachable or failing. A `410` means the handle is dead and is dropped.
+
 ## Key trust
 
 Clients pin each peer's public key on first sight and keep the pins across logout, so a forced re-login can't reset them. When the server later reports a different key (the peer reset their password, or the server is lying), the client stops sending and asks the user to confirm. Old trusted keys are kept so that history stays readable.

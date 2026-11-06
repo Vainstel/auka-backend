@@ -26,6 +26,10 @@ public final class Main {
 
     public static void main(String[] args) {
         Config config = Config.fromEnv(System.getenv());
+        if ("relay".equals(System.getenv("MODE"))) {
+            startRelay(config);
+            return;
+        }
         if (config.inviteCode() == null && !Boolean.parseBoolean(System.getenv("ALLOW_OPEN_REGISTRATION"))) {
             log.error("Set INVITE_CODE, or ALLOW_OPEN_REGISTRATION=true to let anyone who finds this server register");
             System.exit(1);
@@ -37,6 +41,18 @@ public final class Main {
         start(config, new Db(config.dataDir()), json, mailer, pusher);
         log.info("Started on port {}: tls={}, emailVerification={}, push={}, inviteRequired={}",
                 config.port(), config.tlsKeystore() != null, config.emailVerification(), config.apnsEnabled(), config.inviteCode() != null);
+    }
+
+    /** Relay mode: no database, no accounts, only the Apple key and the shared handle secret. */
+    private static void startRelay(Config config) {
+        String secret = System.getenv("RELAY_SECRET");
+        if (secret == null || secret.isBlank() || !config.apnsEnabled()) {
+            log.error("Relay mode needs RELAY_SECRET (32 bytes, base64) and all APNS_* settings");
+            System.exit(1);
+        }
+        ObjectMapper json = jsonMapper();
+        Relay.start(config, java.util.Base64.getDecoder().decode(secret.trim()), json, new Pusher.Apns(config, json));
+        log.info("Push relay started on port {}: tls={}", config.port(), config.tlsKeystore() != null);
     }
 
     static ObjectMapper jsonMapper() {
@@ -139,7 +155,7 @@ public final class Main {
     }
 
     /** Serves HTTPS directly: an IP-only VPS gets a self-signed certificate that the app pins on first use. */
-    private static ServerConnector tlsConnector(org.eclipse.jetty.server.Server server, HttpConfiguration http, Config config) {
+    static ServerConnector tlsConnector(org.eclipse.jetty.server.Server server, HttpConfiguration http, Config config) {
         var ssl = new SslContextFactory.Server();
         ssl.setKeyStorePath(config.tlsKeystore());
         ssl.setKeyStorePassword(config.tlsKeystorePassword());

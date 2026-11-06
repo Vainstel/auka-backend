@@ -1,0 +1,29 @@
+# Push relay: `docker compose -f compose.relay.yaml up -d --build`. Needs only .env.relay; no database.
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    env_file: .env.relay
+    environment:
+      MODE: relay
+    ports:
+      - "${RELAY_BIND:-0.0.0.0}:${RELAY_PORT:-8444}:8443"
+    # Holds only the relay's own TLS certificate.
+    volumes:
+      - relay-data:/data
+    mem_limit: 200m
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,exec,uid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  relay-data:

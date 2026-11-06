@@ -55,12 +55,40 @@ Everything is set through environment variables, usually in `.env`. No secret is
 | `SMTP_HOST` `SMTP_PORT` `SMTP_USERNAME` `SMTP_PASSWORD` | (none), `587` | When `SMTP_HOST` is set, registration and every login need a code from email. Without it, login and password are enough. STARTTLS is mandatory. |
 | `MAIL_FROM` / `MAIL_FROM_NAME` | (none) / `Auka` | Sender of those emails. |
 | `MAIL_MAX_PER_DAY` | `200` | Ceiling on registration and reset emails. Login codes don't count. |
-| `APNS_KEY_BASE64` `APNS_KEY_ID` `APNS_TEAM_ID` `APNS_TOPIC` | (none) | Apple push: the `.p8` key in base64, its id, your team id and the app's bundle id. Without them, messages and rings arrive only while the app is open. |
+| `PUSH_RELAYS` | public Auka relays | Where pushes go. Relays are tried in order: `https://host`, or `https://ip:port\|<cert SHA-256>` for a self-signed one. `none` turns push off. |
+| `APNS_KEY_BASE64` `APNS_KEY_ID` `APNS_TEAM_ID` `APNS_TOPIC` | (none) | Your own Apple key: the server pushes directly and skips the relays. Only useful if you publish your own build of the app. |
 | `APNS_CRITICAL_RING` | `false` | Rings break through silent mode. Only after Apple grants the Critical Alerts entitlement. |
 | `MESSAGE_RETENTION_DAYS` | `0` | Delete messages from the server after N days. `0` keeps them. |
 | `FILE_STORAGE_MB` | `500` | Total room for photos and files. When it's full, uploads fail and the app says to try later. |
 | `FILE_TTL_HOURS` | `168` | How long a file lives on the server (7 days). The app shows the hours left on every file. |
 | `FILE_MAX_MB` | `15` | Largest single file. |
+
+## Push notifications and the relay
+
+Only the holder of the app's Apple key can send it notifications, and a self-hosted server doesn't have that key. So pushes go through **relays**: small stateless services that hold the key. They work automatically, with nothing to configure.
+
+```
+phone ──register token──▶ relay ──handle──▶ phone ──handle──▶ your server
+your server ──"wake handle: message #42"──▶ relay ──▶ Apple ──▶ phone
+phone's extension ──fetch #42──▶ your server, then decrypts it locally
+```
+
+- **What a relay sees:** an opaque handle plus "message" or "ring", the sender's and message's ids (meaningless outside your server), and an unread count. No text, no ciphertext, no names.
+- **What it doesn't see:** your server never learns the phone's real push token. The handle is that token encrypted with the relay's secret, so the relay keeps no database.
+- **Abuse:** handles can't be forged, so nobody can push to arbitrary devices. Every handle is rate-limited, and rings are capped.
+- **Failover:** the server tries the relays in order, so if one is down the next takes over. All relays share one `RELAY_SECRET`, so handles work on any of them.
+
+### Running a relay
+
+Only for whoever publishes the app:
+
+```sh
+cp .env.relay.example .env.relay                 # RELAY_SECRET, APNS_* and PUBLIC_HOST
+docker compose -f compose.relay.yaml up -d --build
+docker compose -f compose.relay.yaml logs | grep -A1 fingerprint
+```
+
+A relay reachable by bare IP uses a self-signed certificate. Servers reach it pinned to its fingerprint (`https://ip:8444|<fingerprint>`). Plain `http://` works too, but then anyone who can watch that traffic can reuse handles to make phones ring.
 
 ## Security
 
@@ -97,4 +125,4 @@ Stack: Java 25, Javalin 7, SQLite, plain JDBC, JDK HTTP/2 for APNs. Migrations a
 
 - 1:1 chats only, about 64,000 characters per message.
 - A forgotten password means a new key: old messages become unreadable, by design.
-- Android push (FCM) isn't implemented yet.
+- Android push (FCM) isn't implemented yet; it will go through the same relays.

@@ -59,7 +59,10 @@ class ApiIT {
         env.put("APNS_TOPIC", "x");
         env.putAll(extraEnv);
         db = new Db(dir);
-        app = Main.start(Config.fromEnv(env), db, json, codes::put, (t, sb, push, dead) -> pushes.add(push));
+        app = Main.start(Config.fromEnv(env), db, json, codes::put, (t, sb, push) -> {
+            pushes.add(push);
+            return 200;
+        });
     }
 
     @AfterEach
@@ -467,10 +470,13 @@ class ApiIT {
         User a = user("alice"), b = user("bobby");
         call("PUT", "/me/push-token", b.token(), Map.of("token", "ab".repeat(32), "sandbox", true));
         sendMsg(a, b, "cipher");
+        Thread.sleep(300);
         assertEquals(1, pushes.size());
-        assertEquals("cipher", pushes.get(0).payload().get("envelope"));
+        // Pushes carry no content, not even ciphertext: the device fetches the message itself.
+        assertFalse(pushes.get(0).payload().toString().contains("cipher"));
         call("POST", "/contacts", b.token(), Map.of("userId", a.id()));
         call("POST", "/rings/" + b.id(), a.token(), null);
+        Thread.sleep(300);
         assertEquals(2, pushes.size());
         assertTrue(pushes.get(1).payload().get("aps").toString().contains("ring.caf"));
     }

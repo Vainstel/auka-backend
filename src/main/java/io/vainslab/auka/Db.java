@@ -123,6 +123,9 @@ final class Db implements AutoCloseable {
             );
             CREATE INDEX files_expires ON files(expires_at);
             ALTER TABLE messages ADD COLUMN file_id TEXT;
+            """,
+            """
+            ALTER TABLE sessions ADD COLUMN push_handle TEXT;
             """
     };
 
