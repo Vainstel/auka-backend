@@ -31,7 +31,8 @@ record Config(
         String pushRelays
 ) {
     /** The public relays the official app's pushes go through. Filled in when they are deployed. */
-    static final String DEFAULT_PUSH_RELAYS = "";
+    static final String DEFAULT_PUSH_RELAYS = "https://auka-relay.vainslab.cc,"
+            + "https://45.151.70.147:8444|65:43:CD:3A:B7:2D:63:97:1A:88:C4:40:03:AC:B0:39:36:B8:FC:37:CE:02:FF:6B:43:A2:DE:1F:03:8C:12:30";
 
     static Config fromEnv(Map<String, String> env) {
         String serverName = env.getOrDefault("SERVER_NAME", "Auka");
