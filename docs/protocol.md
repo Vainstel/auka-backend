@@ -53,7 +53,7 @@ Pushes contain no message content. A message push carries `type:"message"`, `sen
 - `relay`: the app sends its token to a relay from `relays` with `POST /relay/v1/register {token, sandbox}` and gets back `{handle}`. It then sends `PUT /me/push-token {handle}`. A relay with a `pin` is trusted only with that exact certificate.
 - `none`: no pushes.
 
-The server wakes a device with `POST /relay/v1/push {handle, kind, senderId, messageId|ringId, badge}`. It tries relays in order and moves to the next only when one is unreachable or failing. A `410` means the handle is dead and is dropped.
+The server wakes a device with `POST /relay/v1/push {handle, kind, senderId, messageId|ringId, badge}`. It tries relays in order, waiting 5 s for the first and 15 s for each backup, and moves to the next only when one is unreachable or failing. The app registers the same way. A `410` means the handle is dead and is dropped.
 
 ## Key trust
 

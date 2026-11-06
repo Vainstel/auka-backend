@@ -76,7 +76,7 @@ phone's extension ──fetch #42──▶ your server, then decrypts it locally
 - **What a relay sees:** an opaque handle plus "message" or "ring", the sender's and message's ids (meaningless outside your server), and an unread count. No text, no ciphertext, no names.
 - **What it doesn't see:** your server never learns the phone's real push token. The handle is that token encrypted with the relay's secret, so the relay keeps no database.
 - **Abuse:** handles can't be forged, so nobody can push to arbitrary devices. Every handle is rate-limited, and rings are capped.
-- **Failover:** the server tries the relays in order, so if one is down the next takes over. All relays share one `RELAY_SECRET`, so handles work on any of them.
+- **Failover:** the server tries the relays in order: 5 s for the first, 15 s for each backup. If one is down or blocked, the next takes over. All relays share one `RELAY_SECRET`, so handles work on any of them.
 
 ### Running a relay
 

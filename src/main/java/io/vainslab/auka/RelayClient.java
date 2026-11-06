@@ -49,7 +49,7 @@ final class RelayClient {
     RelayClient(List<Target> targets, ObjectMapper json) {
         this.targets = targets;
         this.json = json;
-        for (Target t : targets) clients.add(client(t));
+        for (int i = 0; i < targets.size(); i++) clients.add(client(targets.get(i), timeout(i)));
     }
 
     static List<Target> parseAll(String specs) {
@@ -77,7 +77,7 @@ final class RelayClient {
         for (int i = 0; i < targets.size(); i++) {
             try {
                 HttpRequest req = HttpRequest.newBuilder(URI.create(targets.get(i).url() + Relay.PREFIX + "/push"))
-                        .timeout(Duration.ofSeconds(15))
+                        .timeout(timeout(i))
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofByteArray(bytes))
                         .build();
@@ -95,8 +95,13 @@ final class RelayClient {
     }
 
     /** With a pin, exactly that certificate is accepted; without one, the system's trusted CAs. */
-    private static HttpClient client(Target t) {
-        var builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10));
+    /** The primary gets 5 s, so a blocked one (Cloudflare in some countries) delays a push only briefly; backups get 15 s. */
+    static Duration timeout(int index) {
+        return Duration.ofSeconds(index == 0 ? 5 : 15);
+    }
+
+    private static HttpClient client(Target t, Duration timeout) {
+        var builder = HttpClient.newBuilder().connectTimeout(timeout);
         if (t.pin() != null) {
             try {
                 SSLContext ssl = SSLContext.getInstance("TLS");
