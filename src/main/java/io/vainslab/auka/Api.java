@@ -862,7 +862,8 @@ final class Api {
 
     private static final String PROFILE_COLUMNS = "SELECT id, nickname, display_name, avatar_color, public_key";
     private static final String PROFILE = PROFILE_COLUMNS + " FROM users";
-    private static final String PROFILE_COLUMNS_U = "SELECT u.id, u.nickname, u.display_name, u.avatar_color, u.public_key";
+    // Trailing space: text blocks appended after it may lose their leading indentation.
+    private static final String PROFILE_COLUMNS_U = "SELECT u.id, u.nickname, u.display_name, u.avatar_color, u.public_key ";
 
     private static Map<String, Object> profile(java.sql.ResultSet rs) throws java.sql.SQLException {
         Map<String, Object> m = new HashMap<>();

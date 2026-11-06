@@ -71,7 +71,7 @@ It can see who talks to whom, when, and the approximate message size, plus nickn
 
 ## Ring
 
-`POST /rings/{userId}` rings the other person's devices for 20 seconds. The first ring is free, the next needs 3 minutes, every later one 10 minutes, and an hour of quiet resets the ladder. Too early gets `429 ring_cooldown` with `nextAllowedAt`. The callee must have added the caller as a contact or written to them, otherwise `403 ring_not_allowed`.
+`POST /rings/{userId}` rings the other person's devices for 20 seconds. The first ring is free, then the waits are 1, 3 and 5 minutes, and 10 minutes for every later one, and an hour of quiet resets the ladder. Too early gets `429 ring_cooldown` with `nextAllowedAt`. The callee must have added the caller as a contact or written to them, otherwise `403 ring_not_allowed`.
 
 ## Connection security
 

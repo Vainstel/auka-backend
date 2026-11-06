@@ -334,7 +334,15 @@ class ApiIT {
         assertTrue(call("GET", "/sync", b.token(), null).body().toString().contains("secret-ciphertext"));
         assertTrue(call("GET", "/sync", a.token(), null).body().toString().contains("secret-ciphertext"));
         assertFalse(call("GET", "/sync", c.token(), null).body().toString().contains("secret-ciphertext"));
-        assertEquals(0, call("GET", "/chats", c.token(), null).body().path("chats").size());
+        var outsiderChats = call("GET", "/chats", c.token(), null);
+        assertEquals(200, outsiderChats.status());
+        assertEquals(0, outsiderChats.body().path("chats").size());
+        for (User u : new User[]{a, b}) {
+            var chats = call("GET", "/chats", u.token(), null);
+            assertEquals(200, chats.status());
+            assertEquals(1, chats.body().path("chats").size());
+        }
+        for (String path : new String[]{"/contacts", "/blocks"}) assertEquals(200, call("GET", path, a.token(), null).status());
 
         assertEquals(404, call("DELETE", "/messages/" + id, c.token(), null).status());
         assertEquals(404, call("POST", "/chats/" + a.id() + "/read", c.token(), Map.of("upToId", Long.parseLong(id))).status());
@@ -387,25 +395,27 @@ class ApiIT {
         Res first = call("POST", "/rings/" + b.id(), a.token(), null);
         assertEquals(200, first.status());
         long start = first.body().path("serverTime").asLong();
-        assertEquals(start + RingPolicy.FIRST_COOLDOWN, first.body().path("nextAllowedAt").asLong());
+        assertEquals(start + RingPolicy.cooldown(1), first.body().path("nextAllowedAt").asLong());
 
         Res blocked = call("POST", "/rings/" + b.id(), a.token(), null);
         assertEquals(429, blocked.status());
         assertEquals("ring_cooldown", blocked.body().path("error").asText());
 
-        // Move the clock: the second ring opens after 3 minutes and then needs 10.
-        db.update("UPDATE rings SET last_at=? WHERE caller_id=?", System.currentTimeMillis() - RingPolicy.FIRST_COOLDOWN, a.id());
-        Res second = call("POST", "/rings/" + b.id(), a.token(), null);
-        assertEquals(200, second.status());
-        assertEquals(second.body().path("serverTime").asLong() + RingPolicy.NEXT_COOLDOWN, second.body().path("nextAllowedAt").asLong());
-
-        db.update("UPDATE rings SET last_at=? WHERE caller_id=?", System.currentTimeMillis() - RingPolicy.FIRST_COOLDOWN, a.id());
+        // Move the clock past each wait: 1, 3, 5, then 10 minutes for good.
+        for (int n = 1; n <= 5; n++) {
+            db.update("UPDATE rings SET last_at=? WHERE caller_id=?", System.currentTimeMillis() - RingPolicy.cooldown(n), a.id());
+            Res next = call("POST", "/rings/" + b.id(), a.token(), null);
+            assertEquals(200, next.status());
+            assertEquals(next.body().path("serverTime").asLong() + RingPolicy.cooldown(n + 1), next.body().path("nextAllowedAt").asLong());
+        }
+        assertEquals(10 * 60_000L, RingPolicy.cooldown(6));
+        db.update("UPDATE rings SET last_at=? WHERE caller_id=?", System.currentTimeMillis() - RingPolicy.cooldown(3), a.id());
         assertEquals(429, call("POST", "/rings/" + b.id(), a.token(), null).status());
 
         // An hour of quiet starts the ladder over.
         db.update("UPDATE rings SET last_at=? WHERE caller_id=?", System.currentTimeMillis() - RingPolicy.STREAK_RESET, a.id());
         Res fresh = call("POST", "/rings/" + b.id(), a.token(), null);
-        assertEquals(fresh.body().path("serverTime").asLong() + RingPolicy.FIRST_COOLDOWN, fresh.body().path("nextAllowedAt").asLong());
+        assertEquals(fresh.body().path("serverTime").asLong() + RingPolicy.cooldown(1), fresh.body().path("nextAllowedAt").asLong());
     }
 
     @Test

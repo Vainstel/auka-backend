@@ -24,7 +24,7 @@ Text · copy-exact code blocks · photos and files · a "ring their phone" butto
 - Contacts by `@nickname`; there is no user directory and no search
 - Code blocks that copy back byte for byte, which matters for VPN keys and configs
 - Photos and files up to 15 MB, encrypted, with an expiry date
-- **Ring**: makes the other person's phone play a sound for 20 seconds. Cooldowns are 3 minutes, then 10 minutes, so it can't be spammed
+- **Ring**: makes the other person's phone play a sound for 20 seconds. Cooldowns grow 1, 3, 5, then 10 minutes, so it can't be spammed
 - Email confirmation and a login code (optional), invite codes, blocking
 - Push notifications through APNs. The text is decrypted on the device, so Apple sees only ciphertext
 
