@@ -56,10 +56,18 @@ class RelayIT {
         };
     }
 
+    private Fcm fakeGoogle() {
+        return (token, data, urgent) -> {
+            if (token.startsWith("gone")) return 410;
+            delivered.add("fcm:" + token + ":" + new java.util.TreeMap<>(data) + (urgent ? ":urgent" : ""));
+            return 200;
+        };
+    }
+
     private int startRelay(byte[] secret) throws Exception {
         int port = freePort();
         Map<String, String> env = Map.of("PORT", String.valueOf(port), "DATA_DIR", dir.toString());
-        apps.add(Relay.start(Config.fromEnv(env), secret, json, fakeApple()));
+        apps.add(Relay.start(Config.fromEnv(env), secret, json, fakeApple(), fakeGoogle()));
         return port;
     }
 
@@ -113,6 +121,37 @@ class RelayIT {
         String dead = handle(primary, "dead".repeat(8), false);
         assertEquals(410, post("http://localhost:" + primary + "/relay/v1/push", null,
                 Map.of("handle", dead, "kind", "ring", "senderId", sender, "ringId", UUID.randomUUID().toString())).status());
+    }
+
+    @Test
+    void androidHandlesGoToFirebaseWithIdsOnly() throws Exception {
+        byte[] secret = new byte[32];
+        new java.util.Random(5).nextBytes(secret);
+        int relay = startRelay(secret);
+        String token = "fcmTok3n:APA91b" + "x".repeat(120) + "-_";
+        Res r = post("http://localhost:" + relay + "/relay/v1/register", null, Map.of("platform", "fcm", "token", token));
+        assertEquals(200, r.status(), r.body().toString());
+        String handle = r.body().path("handle").asText();
+        assertFalse(handle.contains("APA91b"));
+
+        String sender = UUID.randomUUID().toString();
+        String ring = UUID.randomUUID().toString();
+        assertEquals(202, post("http://localhost:" + relay + "/relay/v1/push", null,
+                Map.of("handle", handle, "kind", "message", "senderId", sender, "messageId", 9, "badge", 2)).status());
+        assertEquals(202, post("http://localhost:" + relay + "/relay/v1/push", null,
+                Map.of("handle", handle, "kind", "ring", "senderId", sender, "ringId", ring)).status());
+        assertEquals(List.of(
+                "fcm:" + token + ":{messageId=9, senderId=" + sender + ", type=message}",
+                "fcm:" + token + ":{ringId=" + ring + ", senderId=" + sender + ", type=ring}:urgent"), delivered);
+
+        // An APNs-looking token can't be registered as Android and the other way round.
+        assertEquals(400, post("http://localhost:" + relay + "/relay/v1/register", null, Map.of("platform", "fcm", "token", "bad token!")).status());
+        assertEquals(400, post("http://localhost:" + relay + "/relay/v1/register", null, Map.of("token", token)).status());
+
+        String gone = post("http://localhost:" + relay + "/relay/v1/register", null, Map.of("platform", "fcm", "token", "gone" + "y".repeat(60)))
+                .body().path("handle").asText();
+        assertEquals(410, post("http://localhost:" + relay + "/relay/v1/push", null,
+                Map.of("handle", gone, "kind", "message", "senderId", sender, "messageId", 1)).status());
     }
 
     @Test

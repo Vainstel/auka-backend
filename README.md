@@ -71,12 +71,12 @@ Everything is set through environment variables, usually in `.env`. No secret is
 
 ## Push notifications and the relay
 
-Only the holder of the app's Apple key can send it notifications, and a self-hosted server doesn't have that key. So pushes go through **relays**: small stateless services that hold the key. They work automatically, with nothing to configure.
+Only the holder of the app's Apple key (iOS) and Firebase key (Android) can send it notifications, and a self-hosted server doesn't have those keys. So pushes go through **relays**: small stateless services that hold them. They work automatically, with nothing to configure.
 
 ```
 phone ──register token──▶ relay ──handle──▶ phone ──handle──▶ your server
-your server ──"wake handle: message #42"──▶ relay ──▶ Apple ──▶ phone
-phone's extension ──fetch #42──▶ your server, then decrypts it locally
+your server ──"wake handle: message #42"──▶ relay ──▶ Apple / Google ──▶ phone
+phone ──fetch #42──▶ your server, then decrypts it locally
 ```
 
 - **What a relay sees:** an opaque handle plus "message" or "ring", the sender's and message's ids (meaningless outside your server), and an unread count. No text, no ciphertext, no names.
@@ -89,7 +89,7 @@ phone's extension ──fetch #42──▶ your server, then decrypts it locally
 Only for whoever publishes the app:
 
 ```sh
-cp .env.relay.example .env.relay                 # RELAY_SECRET, APNS_* and PUBLIC_HOST
+cp .env.relay.example .env.relay                 # RELAY_SECRET, APNS_*, FCM_* and PUBLIC_HOST
 docker compose -f compose.relay.yaml up -d --build
 docker compose -f compose.relay.yaml logs | grep -A1 fingerprint
 ```

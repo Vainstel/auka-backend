@@ -388,7 +388,7 @@ final class Api {
         Session s = session(ctx);
         JsonNode b = body(ctx);
         if (b.hasNonNull("handle")) {
-            String handle = text(b, "handle", 400);
+            String handle = text(b, "handle", 1500);
             if (!handle.matches("^[A-Za-z0-9_-]+$")) throw new ApiError(400, "invalid_request");
             db.tx(() -> {
                 db.update("UPDATE sessions SET push_handle=NULL WHERE push_handle=?", handle);

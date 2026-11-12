@@ -51,8 +51,10 @@ public final class Main {
             System.exit(1);
         }
         ObjectMapper json = jsonMapper();
-        Relay.start(config, java.util.Base64.getDecoder().decode(secret.trim()), json, new Pusher.Apns(config, json));
-        log.info("Push relay started on port {}: tls={}", config.port(), config.tlsKeystore() != null);
+        String fcmAccount = System.getenv("FCM_SERVICE_ACCOUNT_BASE64");
+        Fcm fcm = fcmAccount == null || fcmAccount.isBlank() ? null : new Fcm.Http(fcmAccount, json);
+        Relay.start(config, java.util.Base64.getDecoder().decode(secret.trim()), json, new Pusher.Apns(config, json), fcm);
+        log.info("Push relay started on port {}: tls={}, fcm={}", config.port(), config.tlsKeystore() != null, fcm != null);
     }
 
     static ObjectMapper jsonMapper() {

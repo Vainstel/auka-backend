@@ -28,30 +28,34 @@ final class Relay {
     private static final Logger log = LoggerFactory.getLogger(Relay.class);
     static final String PREFIX = "/relay/v1";
     private static final Pattern APNS_TOKEN = Pattern.compile("^[0-9a-fA-F]{32,256}$");
+    private static final Pattern FCM_TOKEN = Pattern.compile("^[A-Za-z0-9_:-]{32,1024}$");
     private static final long MINUTE = 60_000L;
     private static final long HOUR = 60 * MINUTE;
 
-    private record Device(String token, boolean sandbox) {
+    /** platform: 'p' APNs production, 's' APNs sandbox, 'f' Firebase (Android). */
+    private record Device(String token, char platform) {
     }
 
     private final SecretKeySpec key;
     private final ObjectMapper json;
     private final Pusher pusher;
+    private final Fcm fcm;
     private final boolean criticalRing;
     private final boolean trustProxy;
     private final RateLimiter limiter = new RateLimiter();
 
-    Relay(byte[] secret, ObjectMapper json, Pusher pusher, boolean criticalRing, boolean trustProxy) {
+    Relay(byte[] secret, ObjectMapper json, Pusher pusher, Fcm fcm, boolean criticalRing, boolean trustProxy) {
         if (secret.length != 32) throw new IllegalStateException("RELAY_SECRET must be 32 bytes in base64");
         this.key = new SecretKeySpec(secret, "AES");
         this.json = json;
         this.pusher = pusher;
+        this.fcm = fcm;
         this.criticalRing = criticalRing;
         this.trustProxy = trustProxy;
     }
 
-    static Javalin start(Config config, byte[] secret, ObjectMapper json, Pusher pusher) {
-        Relay relay = new Relay(secret, json, pusher, config.apnsCriticalRing(), config.trustProxy());
+    static Javalin start(Config config, byte[] secret, ObjectMapper json, Pusher pusher, Fcm fcm) {
+        Relay relay = new Relay(secret, json, pusher, fcm, config.apnsCriticalRing(), config.trustProxy());
         Javalin app = Javalin.create(c -> {
             c.startup.showJavalinBanner = false;
             c.http.maxRequestSize = 4096;
@@ -68,7 +72,9 @@ final class Relay {
                 log.error("Unhandled {}", e.getClass().getSimpleName(), e);
                 ctx.status(500).contentType("application/json").result("{\"error\":\"internal\"}");
             });
-            c.routes.get(PREFIX + "/info", ctx -> ctx.contentType("application/json").result("{\"service\":\"auka-relay\",\"version\":1}"));
+            c.routes.get(PREFIX + "/info", ctx -> ctx.contentType("application/json").result(
+                    relay.fcm != null ? "{\"service\":\"auka-relay\",\"version\":1,\"platforms\":[\"apns\",\"fcm\"]}"
+                            : "{\"service\":\"auka-relay\",\"version\":1,\"platforms\":[\"apns\"]}"));
             c.routes.post(PREFIX + "/register", relay::register);
             c.routes.post(PREFIX + "/push", relay::push);
             c.routes.before(ctx -> relay.limiter.check("ip:" + relay.ip(ctx), 1200, MINUTE));
@@ -92,8 +98,15 @@ final class Relay {
         limiter.check("ip:register:" + ip(ctx), 30, HOUR);
         JsonNode b = body(ctx);
         String token = b.path("token").asText("");
-        if (!APNS_TOKEN.matcher(token).matches()) throw new ApiError(400, "invalid_request");
-        String handle = seal(new Device(token.toLowerCase(), b.path("sandbox").asBoolean(false)));
+        Device device;
+        if (b.path("platform").asText("apns").equals("fcm")) {
+            if (fcm == null || !FCM_TOKEN.matcher(token).matches()) throw new ApiError(400, "invalid_request");
+            device = new Device(token, 'f');
+        } else {
+            if (!APNS_TOKEN.matcher(token).matches()) throw new ApiError(400, "invalid_request");
+            device = new Device(token.toLowerCase(), b.path("sandbox").asBoolean(false) ? 's' : 'p');
+        }
+        String handle = seal(device);
         ctx.contentType("application/json").result(write(json, Map.of("handle", handle)));
     }
 
@@ -121,7 +134,19 @@ final class Relay {
         } else {
             throw new ApiError(400, "invalid_request");
         }
-        int status = pusher.deliver(device.token(), device.sandbox(), new Pusher.Push(payload, collapseId));
+        int status;
+        if (device.platform() == 'f') {
+            if (fcm == null) throw new ApiError(400, "invalid_handle");
+            // Android gets ids only; the app fetches, decrypts and shows the notification itself.
+            Map<String, String> data = new HashMap<>();
+            data.put("type", kind);
+            data.put("senderId", senderId);
+            if (kind.equals("message")) data.put("messageId", String.valueOf(payload.get("messageId")));
+            else data.put("ringId", String.valueOf(payload.get("ringId")));
+            status = fcm.deliver(device.token(), data, kind.equals("ring"));
+        } else {
+            status = pusher.deliver(device.token(), device.platform() == 's', new Pusher.Push(payload, collapseId));
+        }
         if (status == 410) throw new ApiError(410, "handle_gone");
         if (status != 200) throw new ApiError(502, "push_failed");
         ctx.status(202);
@@ -173,7 +198,7 @@ final class Relay {
             Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
             c.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, nonce));
             c.updateAAD("auka-relay-v1".getBytes(StandardCharsets.UTF_8));
-            byte[] ct = c.doFinal(((device.sandbox() ? "s" : "p") + device.token()).getBytes(StandardCharsets.UTF_8));
+            byte[] ct = c.doFinal((device.platform() + device.token()).getBytes(StandardCharsets.UTF_8));
             return Base64.getUrlEncoder().withoutPadding().encodeToString(ByteBuffer.allocate(12 + ct.length).put(nonce).put(ct).array());
         } catch (Exception e) {
             throw new IllegalStateException(e);
@@ -182,13 +207,15 @@ final class Relay {
 
     private java.util.Optional<Device> open(String handle) {
         try {
-            if (handle.isEmpty() || handle.length() > 400) return java.util.Optional.empty();
+            if (handle.isEmpty() || handle.length() > 1500) return java.util.Optional.empty();
             byte[] raw = Base64.getUrlDecoder().decode(handle);
             Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
             c.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, raw, 0, 12));
             c.updateAAD("auka-relay-v1".getBytes(StandardCharsets.UTF_8));
             String plain = new String(c.doFinal(raw, 12, raw.length - 12), StandardCharsets.UTF_8);
-            return java.util.Optional.of(new Device(plain.substring(1), plain.charAt(0) == 's'));
+            char platform = plain.charAt(0);
+            if (platform != 'p' && platform != 's' && platform != 'f') return java.util.Optional.empty();
+            return java.util.Optional.of(new Device(plain.substring(1), platform));
         } catch (Exception e) {
             return java.util.Optional.empty();
         }

@@ -50,10 +50,10 @@ Pushes contain no message content. A message push carries `type:"message"`, `sen
 
 `/server-info` returns `pushMode`:
 - `direct`: the server has its own Apple key. The app sends `PUT /me/push-token {token, sandbox}`.
-- `relay`: the app sends its token to a relay from `relays` with `POST /relay/v1/register {token, sandbox}` and gets back `{handle}`. It then sends `PUT /me/push-token {handle}`. A relay with a `pin` is trusted only with that exact certificate.
+- `relay`: the app sends its token to a relay from `relays` with `POST /relay/v1/register {token, sandbox}` (iOS) or `{platform: "fcm", token}` (Android) and gets back `{handle}`. It then sends `PUT /me/push-token {handle}`. A relay with a `pin` is trusted only with that exact certificate.
 - `none`: no pushes.
 
-The server wakes a device with `POST /relay/v1/push {handle, kind, senderId, messageId|ringId, badge}`. It tries relays in order, waiting 5 s for the first and 15 s for each backup, and moves to the next only when one is unreachable or failing. The app registers the same way. A `410` means the handle is dead and is dropped.
+The server wakes a device with `POST /relay/v1/push {handle, kind, senderId, messageId|ringId, badge}`. It tries relays in order, waiting 5 s for the first and 15 s for each backup, and moves to the next only when one is unreachable or failing. The app registers the same way. A `410` means the handle is dead and is dropped. On Android the relay sends a high-priority FCM data message with only `type`, `senderId` and `messageId` or `ringId`; the app fetches and decrypts the message and shows the notification itself.
 
 ## Key trust
 
